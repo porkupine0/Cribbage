@@ -71,6 +71,13 @@ input[type=text],select{font:inherit;width:100%;padding:10px 12px;border-radius:
 .names{display:flex;flex-direction:column;gap:8px}
 .setrow{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--line)}
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.names .row .mv{padding:0;width:40px;height:40px;flex:none;font-size:17px}
+.pstats>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px}
+.pstats>summary::-webkit-details-marker{display:none}
+.pstats>summary::after{content:"▸";margin-left:auto;color:var(--muted)}
+.pstats[open]>summary::after{content:"▾"}
+.pstats[open]>summary{margin-bottom:14px}
+.pstats>div{display:flex;flex-direction:column;gap:14px}
 .lbl{font-weight:700}
 .red{color:#d63a33}
 .dot{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:6px;vertical-align:-1px}
@@ -365,6 +372,64 @@ async function keepAwake(){
 }
 document.addEventListener("visibilitychange", keepAwake);
 
+// ---------- player stats ----------
+// Each seat's numbers for the current game. Pegging is tapped per side, so it's only a player's own when they play alone.
+function seatStats(){
+  const solo = state.sides.map((_,i) => state.seats.filter(x => x.side === i).length === 1);
+  const pp = state.seats.map(x => ({ n:x.name, hands:0, handPts:0, cribs:0, cribPts:0, best:-1, zeros:0, big:0, heels:0, peg: solo[x.side] ? 0 : null }));
+  state.events.forEach(e => {
+    if (e.kind === "peg"){ const k = state.seats.findIndex(x => x.side === e.side); if (solo[e.side]) pp[k].peg += e.pts; }
+    if (e.kind === "heels"){ pp[e.who].heels++; if (pp[e.who].peg != null) pp[e.who].peg += e.pts; }
+    if (e.kind === "hand" || e.kind === "crib"){
+      const p = pp[e.who];
+      if (e.kind === "hand"){ p.hands++; p.handPts += e.pts; } else { p.cribs++; p.cribPts += e.pts; }
+      p.best = Math.max(p.best, e.pts); if (e.pts === 0) p.zeros++; if (e.pts >= 12) p.big++; if (e.pts === 29) p.perfect = (p.perfect || 0) + 1;
+    }
+  });
+  return pp;
+}
+// Career numbers by player name, from every game in History that recorded them (the current game included).
+function careerStats(){
+  const map = new Map();
+  hx.games().forEach(g => {
+    const pp = g.extra && Array.isArray(g.extra.pp) ? g.extra.pp : null; if (!pp) return;
+    pp.forEach(x => {
+      if (!x || HX.guest(x.n) || !String(x.n || "").trim()) return;
+      const k = String(x.n).trim().replace(/\s+/g, " ").toLowerCase();
+      const c = map.get(k) || { name:String(x.n).trim(), gp:0, hands:0, handPts:0, cribs:0, cribPts:0, best:-1, zeros:0, big:0, heels:0, peg:0, pegGames:0, perfect:0 };
+      c.gp++; c.hands += x.hands; c.handPts += x.handPts; c.cribs += x.cribs; c.cribPts += x.cribPts;
+      c.best = Math.max(c.best, x.best); c.zeros += x.zeros; c.big += x.big; c.heels += x.heels; c.perfect += x.perfect || 0;
+      if (x.peg != null){ c.peg += x.peg; c.pegGames++; }
+      map.set(k, c);
+    });
+  });
+  return [...map.values()].sort((a,b) => b.gp - a.gp || a.name.localeCompare(b.name));
+}
+let pstatsOpen = null; // remembers the panel being opened or closed, across redraws
+document.addEventListener("toggle", e => { if (e.target.classList && e.target.classList.contains("pstats")) pstatsOpen = e.target.open; }, true);
+function playerStatsView(open){
+  if (pstatsOpen != null) open = pstatsOpen;
+  const list = careerStats(); if (!list.length) return "";
+  const avg = (a,b) => b ? (a/b).toFixed(1) : "–";
+  const aw = (a,b,c) => `<div class="aw"><span class="an">${a}</span><span class="ah">${b}</span><span class="ad">${c}</span></div>`;
+  const lead = (f, ok) => { const r = list.filter(ok || (() => true)); if (!r.length) return null; const m = Math.max(...r.map(f)); return { m, who: r.filter(c => f(c) === m).slice(0,3).map(c => esc(c.name)).join(", ") }; };
+  const bh = lead(c => c.best), ha = lead(c => c.handPts / c.hands, c => c.hands >= 5), ca = lead(c => c.cribPts / c.cribs, c => c.cribs >= 3), pg = lead(c => c.peg / c.pegGames, c => c.pegGames > 0), nz = lead(c => c.zeros);
+  const cards = [
+    aw("Best hand ever", bh && bh.m >= 0 ? bh.who : "–", bh && bh.m >= 0 ? `${bh.m} points` : "No hands counted yet"),
+    aw("Best hand average", ha ? ha.who : "Not enough yet", ha ? `${ha.m.toFixed(1)} per hand` : "After 5 hands counted"),
+    aw("Crib king", ca ? ca.who : "Not enough yet", ca ? `${ca.m.toFixed(1)} per crib` : "After 3 cribs counted"),
+    aw("Top pegger", pg ? pg.who : "Nobody yet", pg ? `${pg.m.toFixed(1)} pegged per game` : "From 2- and 3-player games"),
+  ];
+  if (nz && nz.m) cards.push(aw("Nineteen club", nz.who, `${plural(nz.m,"zero hand")}`));
+  const p29 = list.filter(c => c.perfect); if (p29.length) cards.push(aw("Perfect 29", p29.map(c => esc(c.name)).join(", "), "The best hand in cribbage"));
+  return `<details class="panel pstats" ${open?"open":""}><summary><h2>Player stats</h2><span class="hint">all games</span></summary><div>
+    <div class="hl">${cards.join("")}</div>
+    <div class="tablewrap"><table class="st"><thead><tr><th>Player</th><th>Games</th><th>Hand avg</th><th>Crib avg</th><th>Peg/game</th><th>Best</th><th>12+</th><th>Zeros</th><th>Heels</th></tr></thead>
+    <tbody>${list.map(c => `<tr><td>${esc(c.name)}</td><td>${c.gp}</td><td>${avg(c.handPts,c.hands)}</td><td>${avg(c.cribPts,c.cribs)}</td><td>${avg(c.peg,c.pegGames)}</td><td>${c.best>=0?c.best:"–"}</td><td>${c.big}</td><td>${c.zeros}</td><td>${c.heels}</td></tr>`).join("")}</tbody></table></div>
+    <p class="hint">By name, across every game in History, this one included. Peg/game only counts 2- and 3-player games, since partners peg as a team. 12+ is hands and cribs worth 12 or more; Heels is Jacks cut as dealer. Name players the same way each game to keep their stats together.</p>
+  </div></details>`;
+}
+
 // ---------- views ----------
 function render(){
   const app = document.getElementById("app");
@@ -389,8 +454,13 @@ function setupView(){
       <input type="text" id="p-${t}-1" data-p="${t}-1" placeholder="Partner 2" value="${esc(su.teams[t].p[1])}" maxlength="14" autocomplete="off" aria-label="Team ${t+1} partner 2"></div></div>`).join("") +
       `<p class="hint">Partners sit across from each other.</p>`;
   } else {
-    people = `<div class="names">${Array.from({length:+su.mode},(_,i)=>`<div class="row"><span class="dot s${i}"></span><input type="text" id="name-${i}" data-name="${i}" placeholder="Player ${i+1}" value="${esc(su.names[i])}" maxlength="14" autocomplete="off" aria-label="Player ${i+1}"></div>`).join("")}</div>`;
+    const n = +su.mode;
+    people = `<div class="names">${Array.from({length:n},(_,i)=>`<div class="row"><span class="dot s${i}"></span><input type="text" id="name-${i}" data-name="${i}" placeholder="Player ${i+1}" value="${esc(su.names[i])}" maxlength="14" autocomplete="off" aria-label="Player ${i+1}">
+      <button class="small mv" id="mv-${i}-up" data-act="seatMove" data-i="${i}" data-d="-1" aria-label="Move ${esc(seats[i].name)} up" ${i===0?"disabled":""}>↑</button><button class="small mv" id="mv-${i}-dn" data-act="seatMove" data-i="${i}" data-d="1" aria-label="Move ${esc(seats[i].name)} down" ${i===n-1?"disabled":""}>↓</button></div>`).join("")}</div>`;
   }
+  // seats run clockwise, so this is also the order of play: the player after the dealer leads and counts first
+  people += `<p class="hint">Seating, clockwise: <span id="seat-order">${seats.map(s=>esc(s.name)).join(" → ")}</span>.${su.mode==="4t"?"":" Use the arrows to change the order."}</p>` +
+    (su.mode==="4t" ? `<button class="small" data-act="swapSeats" id="swapSeats">Switch Team 2's seats</button>` : "");
   const opts = seats.map((s,i)=>`<option value="${i}" ${i===su.firstDealer?"selected":""}>${esc(s.name)}</option>`).join("");
   return `<div class="panel">
     <div class="opts">
@@ -404,7 +474,8 @@ function setupView(){
     <div class="setrow"><span class="lbl">Game length</span>
       <div class="opts"><button class="opt" id="tg-121" data-act="target" data-v="121" aria-pressed="${su.target===121}">121, the full game</button><button class="opt" id="tg-61" data-act="target" data-v="61" aria-pressed="${su.target===61}">61, a quick game</button></div></div>
   </div>
-  <button class="primary" data-act="begin" id="begin">Start game</button>`;
+  <button class="primary" data-act="begin" id="begin">Start game</button>
+  ${playerStatsView(true)}`;
 }
 
 function boardView(){
@@ -441,7 +512,7 @@ function playView(){
   } else if (state.match.results.length){
     top = `<div class="panel" style="padding:12px 16px"><div class="match">${matchLine()}</div></div>`;
   }
-  return top + boardView() + (w == null ? handView(h) : "") + historyView() + statsView() +
+  return top + boardView() + (w == null ? handView(h) : "") + historyView() + statsView() + playerStatsView(false) +
     `<p class="hint">Every game is saved in History on this device, and the screen stays on while you play.</p>`;
 }
 
@@ -590,6 +661,8 @@ function statsView(){
     <div class="tablewrap"><table class="st"><thead><tr><th></th><th>Pegged</th><th>Peg %</th><th>Hand avg</th><th>Crib avg</th><th>Best</th><th>Zeros</th></tr></thead>
     <tbody>${state.sides.map((s,i)=>{ const myBest = Math.max(-1, ...E.filter(e=>e.side===i&&(e.kind==="hand"||e.kind==="crib")).map(e=>e.pts));
       return `<tr><td><span class="dot s${i}"></span>${SN(i)}</td><td>${peg[i]}</td><td>${t[i]?Math.round(100*peg[i]/t[i])+"%":"–"}</td><td>${avg(hand[i],handN[i])}</td><td>${avg(crib[i],cribN[i])}</td><td>${myBest>=0?myBest:"–"}</td><td>${zeros[i]}</td></tr>`; }).join("")}</tbody></table></div>
+    ${state.seats.length > state.sides.length ? (() => { const pp = seatStats(); return `<div class="tablewrap"><table class="st"><thead><tr><th>By player</th><th>Hand avg</th><th>Crib avg</th><th>Best</th><th>Zeros</th></tr></thead>
+      <tbody>${pp.map((p,k)=>`<tr><td><span class="dot s${state.seats[k].side}"></span>${PN(k)}</td><td>${avg(p.handPts,p.hands)}</td><td>${avg(p.cribPts,p.cribs)}</td><td>${p.best>=0?p.best:"–"}</td><td>${p.zeros}</td></tr>`).join("")}</tbody></table></div>`; })() : ""}
     <p class="hint">Peg % is the share of each score that came from pegging, including his heels. Averages cover hands counted so far.</p></div>`;
 }
 
@@ -659,6 +732,17 @@ document.addEventListener("click", e => {
     case "tab": state.tab = b.dataset.v; save(); render(); window.scrollTo(0,0); break;
     case "mode": su.mode = b.dataset.v; su.firstDealer = 0; save(); render(); break;
     case "target": su.target = +b.dataset.v; save(); render(); break;
+    case "seatMove": { // keep the first dealer on the same person as they move
+      const i = +b.dataset.i, j = i + +b.dataset.d; if (j < 0 || j >= +su.mode) break;
+      [su.names[i], su.names[j]] = [su.names[j], su.names[i]];
+      if (su.firstDealer === i) su.firstDealer = j; else if (su.firstDealer === j) su.firstDealer = i;
+      save(); render(); const el = document.getElementById(`mv-${j}-${+b.dataset.d < 0 ? "up" : "dn"}`); if (el && !el.disabled) el.focus(); break;
+    }
+    case "swapSeats": { // Team 2's partners trade places: seats 1 and 3
+      su.teams[1].p.reverse();
+      if (su.firstDealer === 1) su.firstDealer = 3; else if (su.firstDealer === 3) su.firstDealer = 1;
+      save(); render(); break;
+    }
     case "begin": {
       const { sides, seats } = buildSeats(su);
       state.sides = sides; state.seats = seats; state.target = su.target; state.hands = []; state.events = []; state.match = { results:[] };
@@ -714,7 +798,8 @@ document.addEventListener("input", e => {
   if (t.dataset.name != null){ su.names[+t.dataset.name] = t.value; touched = true; }
   if (t.dataset.tname != null){ su.teams[+t.dataset.tname].name = t.value; touched = true; }
   if (t.dataset.p != null){ const [i,k] = t.dataset.p.split("-").map(Number); su.teams[i].p[k] = t.value; touched = true; }
-  if (touched){ save(); const sel = document.getElementById("first-dealer"); if (sel) buildSeats(su).seats.forEach((s,i)=>{ if (sel.options[i]) sel.options[i].textContent = s.name; }); }
+  if (touched){ save(); const sel = document.getElementById("first-dealer"), seats = buildSeats(su).seats; if (sel) seats.forEach((s,i)=>{ if (sel.options[i]) sel.options[i].textContent = s.name; });
+    const so = document.getElementById("seat-order"); if (so) so.textContent = seats.map(s=>s.name).join(" → "); }
 });
 document.addEventListener("change", e => { if (e.target.id === "first-dealer"){ state.setup.firstDealer = +e.target.value; save(); } });
 
@@ -750,7 +835,7 @@ const HX = {
       done, winners: done ? [w] : undefined,
       labels: hs.map(h => { const d = seat((state.hands[h] || {}).dealer); return d ? `${h + 1} · ${d}` : String(h + 1); }),
       note: `to ${state.target}` + (sk === 2 ? " · double skunk" : sk ? " · skunk" : ""),
-      extra: { peg, hand, crib, best: best < 0 ? undefined : best, bestBy: best < 0 ? undefined : bestBy, sk: done ? sk : undefined, game: past.length + 1, won }
+      extra: { pp: seatStats(), peg, hand, crib, best: best < 0 ? undefined : best, bestBy: best < 0 ? undefined : bestBy, sk: done ? sk : undefined, game: past.length + 1, won }
     };
   },
   detail(g){
